@@ -283,6 +283,7 @@ public final class Statistics
             case NUMBER_OF_DISTINCT_VALUES:
                 result.setDistinctValuesCount(0);
                 return;
+            case KHYPERLOGLOG:
             case NUMBER_OF_DISTINCT_VALUES_SUMMARY:
                 break; // unsupported
             case NUMBER_OF_NON_NULL_VALUES:

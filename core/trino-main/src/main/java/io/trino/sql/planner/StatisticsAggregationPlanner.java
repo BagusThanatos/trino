@@ -45,6 +45,7 @@ import static io.trino.spi.statistics.TableStatisticType.ROW_COUNT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
+import static io.trino.spi.type.KHyperLogLogType.KHYPER_LOG_LOG;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static java.util.Objects.requireNonNull;
 
@@ -120,6 +121,8 @@ public class StatisticsAggregationPlanner
             case NUMBER_OF_DISTINCT_VALUES_SUMMARY:
                 // we use $approx_set here and not approx_set because latter is not defined for all types supported by Trino
                 return createAggregation(QualifiedName.of("$approx_set"), input.toSymbolReference(), inputType, HYPER_LOG_LOG);
+            case KHYPERLOGLOG:
+                return createAggregation(QualifiedName.of("khyperloglog_agg"), input.toSymbolReference(), inputType, KHYPER_LOG_LOG);
             case NUMBER_OF_NON_NULL_VALUES:
                 return createAggregation(QualifiedName.of("count"), input.toSymbolReference(), inputType, BIGINT);
             case NUMBER_OF_TRUE_VALUES:

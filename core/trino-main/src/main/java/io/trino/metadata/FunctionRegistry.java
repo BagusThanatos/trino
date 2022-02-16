@@ -31,6 +31,7 @@ import io.trino.operator.aggregation.ApproximateLongPercentileArrayAggregations;
 import io.trino.operator.aggregation.ApproximateRealPercentileAggregations;
 import io.trino.operator.aggregation.ApproximateRealPercentileArrayAggregations;
 import io.trino.operator.aggregation.ApproximateSetAggregation;
+import io.trino.operator.aggregation.ApproximateSetAggregationKHyperLogLog;
 import io.trino.operator.aggregation.ApproximateSetGenericAggregation;
 import io.trino.operator.aggregation.AverageAggregations;
 import io.trino.operator.aggregation.BigintApproximateMostFrequent;
@@ -64,6 +65,7 @@ import io.trino.operator.aggregation.MapUnionAggregation;
 import io.trino.operator.aggregation.MaxDataSizeForStats;
 import io.trino.operator.aggregation.MaxNAggregationFunction;
 import io.trino.operator.aggregation.MergeHyperLogLogAggregation;
+import io.trino.operator.aggregation.MergeKHyperLogLogAggregation;
 import io.trino.operator.aggregation.MergeQuantileDigestFunction;
 import io.trino.operator.aggregation.MergeTDigestAggregation;
 import io.trino.operator.aggregation.MinNAggregationFunction;
@@ -134,6 +136,7 @@ import io.trino.operator.scalar.JoniRegexpFunctions;
 import io.trino.operator.scalar.JoniRegexpReplaceLambdaFunction;
 import io.trino.operator.scalar.JsonFunctions;
 import io.trino.operator.scalar.JsonOperators;
+import io.trino.operator.scalar.KHyperLogLogFunctions;
 import io.trino.operator.scalar.LuhnCheckFunction;
 import io.trino.operator.scalar.MapCardinalityFunction;
 import io.trino.operator.scalar.MapConcatFunction;
@@ -256,6 +259,7 @@ import io.trino.type.IntegerOperators;
 import io.trino.type.IntervalDayTimeOperators;
 import io.trino.type.IntervalYearMonthOperators;
 import io.trino.type.IpAddressOperators;
+import io.trino.type.KHyperLogLogOperators;
 import io.trino.type.LikeFunctions;
 import io.trino.type.QuantileDigestOperators;
 import io.trino.type.RealOperators;
@@ -456,8 +460,10 @@ public class FunctionRegistry
                 .aggregates(GeometricMeanAggregations.class)
                 .aggregates(RealGeometricMeanAggregations.class)
                 .aggregates(MergeHyperLogLogAggregation.class)
+                .aggregates(MergeKHyperLogLogAggregation.class)
                 .aggregates(ApproximateSetAggregation.class)
                 .aggregates(ApproximateSetGenericAggregation.class)
+                .aggregates(ApproximateSetAggregationKHyperLogLog.class)
                 .aggregates(TDigestAggregationFunction.class)
                 .functions(QDIGEST_AGG, QDIGEST_AGG_WITH_WEIGHT, QDIGEST_AGG_WITH_WEIGHT_AND_ERROR)
                 .function(MergeQuantileDigestFunction.MERGE)
@@ -496,6 +502,7 @@ public class FunctionRegistry
                 .scalars(JsonFunctions.class)
                 .scalars(ColorFunctions.class)
                 .scalars(HyperLogLogFunctions.class)
+                .scalars(KHyperLogLogFunctions.class)
                 .scalars(QuantileDigestFunctions.class)
                 .scalars(TDigestFunctions.class)
                 .scalars(BooleanOperators.class)
@@ -511,6 +518,7 @@ public class FunctionRegistry
                 .scalars(IntervalYearMonthOperators.class)
                 .scalars(DateTimeOperators.class)
                 .scalars(HyperLogLogOperators.class)
+                .scalars(KHyperLogLogOperators.class)
                 .scalars(QuantileDigestOperators.class)
                 .scalars(TDigestOperators.class)
                 .scalars(IpAddressOperators.class)

@@ -11,17 +11,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.spi.statistics;
+package io.trino.operator.aggregation.state;
 
-public enum ColumnStatisticType
+import io.trino.spi.function.AccumulatorState;
+import io.trino.spi.function.AccumulatorStateMetadata;
+
+@AccumulatorStateMetadata(stateSerializerClass = KHyperLogLogStateSerializer.class, stateFactoryClass = KHyperLogLogStateFactory.class)
+public interface KHyperLogLogState
+        extends AccumulatorState
 {
-    MIN_VALUE,
-    MAX_VALUE,
-    NUMBER_OF_DISTINCT_VALUES,
-    NUMBER_OF_DISTINCT_VALUES_SUMMARY,
-    NUMBER_OF_NON_NULL_VALUES,
-    NUMBER_OF_TRUE_VALUES,
-    MAX_VALUE_SIZE_IN_BYTES,
-    TOTAL_SIZE_IN_BYTES,
-    KHYPERLOGLOG,
+    KHyperLogLog getKHyperLogLog();
+
+    void setKHyperLogLog(KHyperLogLog value);
+
+    void addMemoryUsage(int value);
 }

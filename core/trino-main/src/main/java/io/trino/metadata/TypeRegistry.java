@@ -74,6 +74,7 @@ import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.KHyperLogLogType.KHYPER_LOG_LOG;
 import static io.trino.spi.type.P4HyperLogLogType.P4_HYPER_LOG_LOG;
 import static io.trino.spi.type.QuantileDigestParametricType.QDIGEST;
 import static io.trino.spi.type.RealType.REAL;
@@ -140,6 +141,7 @@ public final class TypeRegistry
         addType(INTERVAL_YEAR_MONTH);
         addType(INTERVAL_DAY_TIME);
         addType(HYPER_LOG_LOG);
+        addType(KHYPER_LOG_LOG);
         addType(SET_DIGEST);
         addType(P4_HYPER_LOG_LOG);
         addType(JONI_REGEXP);

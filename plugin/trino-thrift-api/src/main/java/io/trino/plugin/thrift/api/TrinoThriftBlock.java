@@ -26,6 +26,7 @@ import io.trino.plugin.thrift.api.datatypes.TrinoThriftDouble;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftHyperLogLog;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftInteger;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftJson;
+import io.trino.plugin.thrift.api.datatypes.TrinoThriftKHyperLogLog;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftTimestamp;
 import io.trino.plugin.thrift.api.datatypes.TrinoThriftVarchar;
 import io.trino.spi.block.Block;
@@ -76,6 +77,7 @@ public final class TrinoThriftBlock
     // special
     private final TrinoThriftJson jsonData;
     private final TrinoThriftHyperLogLog hyperLogLogData;
+    private final TrinoThriftKHyperLogLog kHyperLogLogData;
 
     // array
     private final TrinoThriftBigintArray bigintArrayData;
@@ -94,7 +96,8 @@ public final class TrinoThriftBlock
             @Nullable TrinoThriftTimestamp timestampData,
             @Nullable TrinoThriftJson jsonData,
             @Nullable TrinoThriftHyperLogLog hyperLogLogData,
-            @Nullable TrinoThriftBigintArray bigintArrayData)
+            @Nullable TrinoThriftBigintArray bigintArrayData,
+            @Nullable TrinoThriftKHyperLogLog kHyperLogLogData)
     {
         this.integerData = integerData;
         this.bigintData = bigintData;
@@ -106,6 +109,7 @@ public final class TrinoThriftBlock
         this.jsonData = jsonData;
         this.hyperLogLogData = hyperLogLogData;
         this.bigintArrayData = bigintArrayData;
+        this.kHyperLogLogData = kHyperLogLogData;
         this.dataReference = theOnlyNonNull(integerData, bigintData, doubleData, varcharData, booleanData, dateData, timestampData, jsonData, hyperLogLogData, bigintArrayData);
     }
 
@@ -219,52 +223,57 @@ public final class TrinoThriftBlock
 
     public static TrinoThriftBlock integerData(TrinoThriftInteger integerData)
     {
-        return new TrinoThriftBlock(integerData, null, null, null, null, null, null, null, null, null);
+        return new TrinoThriftBlock(integerData, null, null, null, null, null, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock bigintData(TrinoThriftBigint bigintData)
     {
-        return new TrinoThriftBlock(null, bigintData, null, null, null, null, null, null, null, null);
+        return new TrinoThriftBlock(null, bigintData, null, null, null, null, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock doubleData(TrinoThriftDouble doubleData)
     {
-        return new TrinoThriftBlock(null, null, doubleData, null, null, null, null, null, null, null);
+        return new TrinoThriftBlock(null, null, doubleData, null, null, null, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock varcharData(TrinoThriftVarchar varcharData)
     {
-        return new TrinoThriftBlock(null, null, null, varcharData, null, null, null, null, null, null);
+        return new TrinoThriftBlock(null, null, null, varcharData, null, null, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock booleanData(TrinoThriftBoolean booleanData)
     {
-        return new TrinoThriftBlock(null, null, null, null, booleanData, null, null, null, null, null);
+        return new TrinoThriftBlock(null, null, null, null, booleanData, null, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock dateData(TrinoThriftDate dateData)
     {
-        return new TrinoThriftBlock(null, null, null, null, null, dateData, null, null, null, null);
+        return new TrinoThriftBlock(null, null, null, null, null, dateData, null, null, null, null, null);
     }
 
     public static TrinoThriftBlock timestampData(TrinoThriftTimestamp timestampData)
     {
-        return new TrinoThriftBlock(null, null, null, null, null, null, timestampData, null, null, null);
+        return new TrinoThriftBlock(null, null, null, null, null, null, timestampData, null, null, null, null);
     }
 
     public static TrinoThriftBlock jsonData(TrinoThriftJson jsonData)
     {
-        return new TrinoThriftBlock(null, null, null, null, null, null, null, jsonData, null, null);
+        return new TrinoThriftBlock(null, null, null, null, null, null, null, jsonData, null, null, null);
     }
 
     public static TrinoThriftBlock hyperLogLogData(TrinoThriftHyperLogLog hyperLogLogData)
     {
-        return new TrinoThriftBlock(null, null, null, null, null, null, null, null, hyperLogLogData, null);
+        return new TrinoThriftBlock(null, null, null, null, null, null, null, null, hyperLogLogData, null, null);
+    }
+
+    public static TrinoThriftBlock kHyperLogLogData(TrinoThriftKHyperLogLog kHyperLogLogData)
+    {
+        return new TrinoThriftBlock(null, null, null, null, null, null, null, null, null, null, kHyperLogLogData);
     }
 
     public static TrinoThriftBlock bigintArrayData(TrinoThriftBigintArray bigintArrayData)
     {
-        return new TrinoThriftBlock(null, null, null, null, null, null, null, null, null, bigintArrayData);
+        return new TrinoThriftBlock(null, null, null, null, null, null, null, null, null, bigintArrayData, null);
     }
 
     public static TrinoThriftBlock fromNativeValue(Object trinoNativeValue, Type type)

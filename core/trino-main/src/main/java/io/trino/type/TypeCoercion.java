@@ -350,6 +350,7 @@ public final class TypeCoercion
                     case StandardTypes.TIMESTAMP:
                     case StandardTypes.TIMESTAMP_WITH_TIME_ZONE:
                     case StandardTypes.HYPER_LOG_LOG:
+                    case StandardTypes.KHYPER_LOG_LOG:
                     case SetDigestType.NAME:
                     case StandardTypes.P4_HYPER_LOG_LOG:
                     case StandardTypes.JSON:
