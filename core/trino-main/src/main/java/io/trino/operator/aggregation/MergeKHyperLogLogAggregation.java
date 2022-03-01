@@ -14,7 +14,6 @@
 package io.trino.operator.aggregation;
 
 import io.airlift.slice.Slice;
-import io.airlift.stats.cardinality.HyperLogLog;
 import io.trino.operator.aggregation.state.KHyperLogLog;
 import io.trino.operator.aggregation.state.KHyperLogLogState;
 import io.trino.operator.aggregation.state.StateCompiler;

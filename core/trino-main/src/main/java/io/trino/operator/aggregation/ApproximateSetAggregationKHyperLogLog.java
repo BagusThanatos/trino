@@ -18,7 +18,14 @@ import io.trino.operator.aggregation.state.KHyperLogLog;
 import io.trino.operator.aggregation.state.KHyperLogLogState;
 import io.trino.operator.aggregation.state.StateCompiler;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.function.*;
+import io.trino.spi.function.AccumulatorStateSerializer;
+import io.trino.spi.function.AggregationFunction;
+import io.trino.spi.function.AggregationState;
+import io.trino.spi.function.CombineFunction;
+import io.trino.spi.function.InputFunction;
+import io.trino.spi.function.LiteralParameters;
+import io.trino.spi.function.OutputFunction;
+import io.trino.spi.function.SqlType;
 import io.trino.spi.type.StandardTypes;
 
 @AggregationFunction("khyperloglog_agg")

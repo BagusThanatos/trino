@@ -13,7 +13,6 @@
  */
 package io.trino.operator.aggregation.state;
 
-import io.airlift.stats.cardinality.HyperLogLog;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.function.AccumulatorStateSerializer;
