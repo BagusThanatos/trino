@@ -35,6 +35,7 @@ import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongWriteFunction;
+import io.trino.plugin.jdbc.ObjectReadFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
@@ -48,6 +49,9 @@ import io.trino.plugin.jdbc.aggregation.ImplementSum;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
 import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.SingleMapBlock;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -58,6 +62,7 @@ import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
@@ -82,6 +87,8 @@ import java.sql.Types;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -94,6 +101,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.plugin.clickhouse.ClickHouseSessionProperties.isMapStringAsVarchar;
 import static io.trino.plugin.clickhouse.ClickHouseTableProperties.ENGINE_PROPERTY;
@@ -132,6 +140,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.varcharReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
+import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -149,6 +158,7 @@ import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
 import static io.trino.spi.type.UuidType.trinoUuidToJavaUuid;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Math.floorDiv;
@@ -192,6 +202,7 @@ public class ClickHouseClient
     private final AggregateFunctionRewriter<JdbcExpression, String> aggregateFunctionRewriter;
     private final Type uuidType;
     private final Type ipAddressType;
+    private final MapType varcharMapType;
 
     @Inject
     public ClickHouseClient(
@@ -204,6 +215,7 @@ public class ClickHouseClient
         super(config, "\"", connectionFactory, queryBuilder, identifierMapping);
         this.uuidType = typeManager.getType(new TypeSignature(StandardTypes.UUID));
         this.ipAddressType = typeManager.getType(new TypeSignature(StandardTypes.IPADDRESS));
+        this.varcharMapType = (MapType) typeManager.getType(TypeSignature.mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
@@ -538,6 +550,8 @@ public class ClickHouseClient
                 return Optional.of(varbinaryColumnMapping());
             case UUID:
                 return Optional.of(uuidColumnMapping());
+            case Map:
+                return Optional.of(mapColumnMapping(session));
             default:
                 // no-op
         }
@@ -823,6 +837,51 @@ public class ClickHouseClient
                 uuidType,
                 (resultSet, columnIndex) -> javaUuidToTrinoUuid((UUID) resultSet.getObject(columnIndex)),
                 uuidWriteFunction());
+    }
+
+    private ColumnMapping mapColumnMapping(ConnectorSession session)
+    {
+        return ColumnMapping.objectMapping(
+                varcharMapType,
+                varcharMapReadFunction(),
+                mapWriteFunction(session),
+                DISABLE_PUSHDOWN);
+    }
+
+    private ObjectReadFunction varcharMapReadFunction()
+    {
+        return ObjectReadFunction.of(Block.class, (resultSet, columnIndex) -> {
+            @SuppressWarnings("unchecked")
+            Map<String, String> map = (Map<String, String>) resultSet.getObject(columnIndex);
+            BlockBuilder keyBlockBuilder = varcharMapType.getKeyType().createBlockBuilder(null, map.size());
+            BlockBuilder valueBlockBuilder = varcharMapType.getValueType().createBlockBuilder(null, map.size());
+            for (Map.Entry<String, String> entry : map.entrySet()) {
+                if (entry.getKey() == null) {
+                    throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "map key is null");
+                }
+                varcharMapType.getKeyType().writeSlice(keyBlockBuilder, utf8Slice(entry.getKey()));
+                if (entry.getValue() == null) {
+                    valueBlockBuilder.appendNull();
+                }
+                else {
+                    varcharMapType.getValueType().writeSlice(valueBlockBuilder, utf8Slice(entry.getValue()));
+                }
+            }
+            return varcharMapType.createBlockFromKeyValue(Optional.empty(), new int[] {0, map.size()}, keyBlockBuilder.build(), valueBlockBuilder.build())
+                    .getObject(0, Block.class);
+        });
+    }
+
+    private ObjectWriteFunction mapWriteFunction(ConnectorSession session)
+    {
+        return ObjectWriteFunction.of(Block.class, (statement, index, block) -> {
+            checkArgument(block instanceof SingleMapBlock, "wrong block type: %s. expected SingleMapBlock", block.getClass().getSimpleName());
+            Map<Object, Object> map = new HashMap<>();
+            for (int i = 0; i < block.getPositionCount(); i += 2) {
+                map.put(varcharMapType.getKeyType().getObjectValue(session, block, i), varcharMapType.getValueType().getObjectValue(session, block, i + 1));
+            }
+            statement.setObject(index, Collections.unmodifiableMap(map));
+        });
     }
 
     private static SliceWriteFunction uuidWriteFunction()
