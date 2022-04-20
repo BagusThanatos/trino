@@ -15,6 +15,7 @@ package io.trino.plugin.clickhouse;
 
 import com.clickhouse.client.ClickHouseColumn;
 import com.clickhouse.client.ClickHouseDataType;
+import com.clickhouse.jdbc.JdbcTypeMapping;
 import com.google.common.base.Enums;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
@@ -66,6 +67,7 @@ import io.trino.spi.type.MapType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -143,6 +145,7 @@ import static io.trino.spi.StandardErrorCode.INVALID_ARGUMENTS;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
@@ -203,6 +206,7 @@ public class ClickHouseClient
     private final Type uuidType;
     private final Type ipAddressType;
     private final MapType varcharMapType;
+    private final TypeOperators typeOperators;
 
     @Inject
     public ClickHouseClient(
@@ -215,7 +219,6 @@ public class ClickHouseClient
         super(config, "\"", connectionFactory, queryBuilder, identifierMapping);
         this.uuidType = typeManager.getType(new TypeSignature(StandardTypes.UUID));
         this.ipAddressType = typeManager.getType(new TypeSignature(StandardTypes.IPADDRESS));
-        this.varcharMapType = (MapType) typeManager.getType(TypeSignature.mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
@@ -230,6 +233,8 @@ public class ClickHouseClient
                         .add(new ImplementAvgFloatingPoint())
                         .add(new ImplementAvgBigint())
                         .build());
+        this.varcharMapType = (MapType) typeManager.getType(TypeSignature.mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
+        this.typeOperators = typeManager.getTypeOperators();
     }
 
     @Override
@@ -551,7 +556,7 @@ public class ClickHouseClient
             case UUID:
                 return Optional.of(uuidColumnMapping());
             case Map:
-                return Optional.of(mapColumnMapping(session));
+                return getMapColumnMapping(typeHandle, column, session, connection);
             default:
                 // no-op
         }
@@ -839,32 +844,80 @@ public class ClickHouseClient
                 uuidWriteFunction());
     }
 
-    private ColumnMapping mapColumnMapping(ConnectorSession session)
+    private Optional<ColumnMapping> getMapColumnMapping(JdbcTypeHandle typeHandle,
+                                                        ClickHouseColumn column,
+                                                        ConnectorSession session,
+                                                        Connection connection)
     {
-        return ColumnMapping.objectMapping(
-                varcharMapType,
-                varcharMapReadFunction(),
-                mapWriteFunction(session),
+        ClickHouseColumn key = column.getKeyInfo();
+        JdbcTypeHandle keyHandle = new JdbcTypeHandle(
+                JdbcTypeMapping.toJdbcType(null, key),
+                Optional.of(key.getOriginalTypeName()),
+                typeHandle.getColumnSize(),
+                typeHandle.getDecimalDigits(),
+                typeHandle.getArrayDimensions(),
+                typeHandle.getCaseSensitivity());
+        Optional<ColumnMapping> keyMapping = toColumnMapping(session, connection, keyHandle);
+        ClickHouseColumn value = column.getValueInfo();
+        JdbcTypeHandle valueHandle = new JdbcTypeHandle(
+                JdbcTypeMapping.toJdbcType(null, value),
+                Optional.of(value.getOriginalTypeName()),
+                typeHandle.getColumnSize(),
+                typeHandle.getDecimalDigits(),
+                typeHandle.getArrayDimensions(),
+                typeHandle.getCaseSensitivity());
+        Optional<ColumnMapping> valueMapping = toColumnMapping(session, connection, valueHandle);
+        if (keyMapping.isEmpty() || valueMapping.isEmpty()) {
+            return Optional.empty();
+        }
+        MapType mapType = new MapType(keyMapping.get().getType(), valueMapping.get().getType(), this.typeOperators);
+
+        ColumnMapping result = ColumnMapping.objectMapping(
+                mapType,
+                mapReadFunction(mapType),
+                mapWriteFunction(session, mapType),
                 DISABLE_PUSHDOWN);
+        return Optional.of(result);
     }
 
-    private ObjectReadFunction varcharMapReadFunction()
+    private ObjectReadFunction mapReadFunction(MapType mapType)
     {
         return ObjectReadFunction.of(Block.class, (resultSet, columnIndex) -> {
             @SuppressWarnings("unchecked")
-            Map<String, String> map = (Map<String, String>) resultSet.getObject(columnIndex);
-            BlockBuilder keyBlockBuilder = varcharMapType.getKeyType().createBlockBuilder(null, map.size());
-            BlockBuilder valueBlockBuilder = varcharMapType.getValueType().createBlockBuilder(null, map.size());
-            for (Map.Entry<String, String> entry : map.entrySet()) {
+            Map<Object, Object> map = (Map<Object, Object>) resultSet.getObject(columnIndex);
+            Type keyType = mapType.getKeyType();
+            Type valueType = mapType.getValueType();
+            BlockBuilder keyBlockBuilder = keyType.createBlockBuilder(null, map.size());
+            BlockBuilder valueBlockBuilder = valueType.createBlockBuilder(null, map.size());
+            for (Map.Entry<Object, Object> entry : map.entrySet()) {
                 if (entry.getKey() == null) {
                     throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "map key is null");
                 }
-                varcharMapType.getKeyType().writeSlice(keyBlockBuilder, utf8Slice(entry.getKey()));
+
+                if (keyType.getJavaType() == long.class) {
+                    keyType.writeLong(keyBlockBuilder, (long) entry.getKey());
+                }
+                else if (keyType.getJavaType() == Slice.class) {
+                    // Assume String
+                    keyType.writeSlice(keyBlockBuilder, utf8Slice((String) entry.getKey()));
+                }
+                else {
+                    throw new TrinoException(TYPE_MISMATCH, "Map key type is not supported");
+                }
                 if (entry.getValue() == null) {
                     valueBlockBuilder.appendNull();
                 }
                 else {
-                    varcharMapType.getValueType().writeSlice(valueBlockBuilder, utf8Slice(entry.getValue()));
+                    if (valueType.getJavaType() == long.class) {
+                        valueType.writeLong(valueBlockBuilder, (long) entry.getValue());
+                    }
+                    else if (valueType.getJavaType() == Slice.class) {
+                        // Assume String
+                        valueType.writeSlice(valueBlockBuilder, utf8Slice((String) entry.getValue()));
+                    }
+                    else {
+                        throw new TrinoException(TYPE_MISMATCH, "Map value type is not supported");
+                    }
                 }
             }
             return varcharMapType.createBlockFromKeyValue(Optional.empty(), new int[] {0, map.size()}, keyBlockBuilder.build(), valueBlockBuilder.build())
@@ -872,7 +925,7 @@ public class ClickHouseClient
         });
     }
 
-    private ObjectWriteFunction mapWriteFunction(ConnectorSession session)
+    private ObjectWriteFunction mapWriteFunction(ConnectorSession session, MapType mapType)
     {
         return ObjectWriteFunction.of(Block.class, (statement, index, block) -> {
             checkArgument(block instanceof SingleMapBlock, "wrong block type: %s. expected SingleMapBlock", block.getClass().getSimpleName());
