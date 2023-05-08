@@ -33,11 +33,15 @@ import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
+import io.trino.plugin.jdbc.JdbcNamedRelationHandle;
+import io.trino.plugin.jdbc.JdbcRelationHandle;
+import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
 import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.ObjectWriteFunction;
+import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.SliceWriteFunction;
@@ -56,7 +60,10 @@ import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.FixedSplitSource;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
@@ -82,11 +89,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -95,6 +105,8 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static com.clickhouse.data.ClickHouseValues.convertToQuotedString;
@@ -184,8 +196,7 @@ import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 public class ClickHouseClient
-        extends BaseJdbcClient
-{
+        extends BaseJdbcClient {
     private static final Splitter TABLE_PROPERTY_SPLITTER = Splitter.on(',').omitEmptyStrings().trimResults();
 
     private static final DecimalType UINT64_TYPE = createDecimalType(20, 0);
@@ -201,6 +212,8 @@ public class ClickHouseClient
     private final Type ipAddressType;
     private final AtomicReference<ClickHouseVersion> clickHouseVersion = new AtomicReference<>();
 
+    private static final Pattern distributedEngine = Pattern.compile("^Distributed\\('([\\w-_]*)',\\s*'([\\w-_]*)',\\s*'([\\w-_]*)'\\)$");
+
     @Inject
     public ClickHouseClient(
             BaseJdbcConfig config,
@@ -208,8 +221,7 @@ public class ClickHouseClient
             QueryBuilder queryBuilder,
             TypeManager typeManager,
             IdentifierMapping identifierMapping,
-            RemoteQueryModifier queryModifier)
-    {
+            RemoteQueryModifier queryModifier) {
         super("\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, false);
         this.uuidType = typeManager.getType(new TypeSignature(StandardTypes.UUID));
         this.ipAddressType = typeManager.getType(new TypeSignature(StandardTypes.IPADDRESS));
@@ -230,27 +242,23 @@ public class ClickHouseClient
     }
 
     @Override
-    public Optional<JdbcExpression> implementAggregation(ConnectorSession session, AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
-    {
+    public Optional<JdbcExpression> implementAggregation(ConnectorSession session, AggregateFunction aggregate, Map<String, ColumnHandle> assignments) {
         // TODO support complex ConnectorExpressions
         return aggregateFunctionRewriter.rewrite(session, aggregate, assignments);
     }
 
     @Override
-    public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets)
-    {
+    public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets) {
         // TODO: Remove override once https://github.com/trinodb/trino/issues/7100 is resolved. Currently pushdown for textual types is not tested and may lead to incorrect results.
         return preventTextualTypeAggregationPushdown(groupingSets);
     }
 
-    private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
-    {
+    private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType) {
         return Optional.of(new JdbcTypeHandle(Types.DECIMAL, Optional.of("Decimal"), Optional.of(decimalType.getPrecision()), Optional.of(decimalType.getScale()), Optional.empty(), Optional.empty()));
     }
 
     @Override
-    protected String quoted(@Nullable String catalog, @Nullable String schema, String table)
-    {
+    protected String quoted(@Nullable String catalog, @Nullable String schema, String table) {
         StringBuilder sb = new StringBuilder();
         if (!isNullOrEmpty(schema)) {
             sb.append(quoted(schema)).append(".");
@@ -260,8 +268,7 @@ public class ClickHouseClient
     }
 
     @Override
-    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
-    {
+    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames) {
         // ClickHouse does not support `create table tbl as select * from tbl2 where 0=1`
         // ClickHouse supports the following two methods to copy schema
         // 1. create table tbl as tbl2
@@ -272,23 +279,20 @@ public class ClickHouseClient
                 quoted(null, schemaName, tableName));
         try {
             execute(session, connection, sql);
-        }
-        catch (SQLException e) {
+        } catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
     @Override
     public Optional<String> getTableComment(ResultSet resultSet)
-            throws SQLException
-    {
+            throws SQLException {
         // Empty remarks means that the table doesn't have a comment in ClickHouse
         return Optional.ofNullable(emptyToNull(resultSet.getString("REMARKS")));
     }
 
     @Override
-    protected String createTableSql(RemoteTableName remoteTableName, List<String> columns, ConnectorTableMetadata tableMetadata)
-    {
+    protected String createTableSql(RemoteTableName remoteTableName, List<String> columns, ConnectorTableMetadata tableMetadata) {
         ImmutableList.Builder<String> tableOptions = ImmutableList.builder();
         Map<String, Object> tableProperties = tableMetadata.getProperties();
         ClickHouseEngineType engine = ClickHouseTableProperties.getEngine(tableProperties);
@@ -308,13 +312,12 @@ public class ClickHouseClient
     }
 
     @Override
-    public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle tableHandle)
-    {
+    public Map<String, Object> getTableProperties(ConnectorSession session, JdbcTableHandle tableHandle) {
         try (Connection connection = connectionFactory.openConnection(session);
-                PreparedStatement statement = connection.prepareStatement("" +
-                        "SELECT engine, sorting_key, partition_key, primary_key, sampling_key " +
-                        "FROM system.tables " +
-                        "WHERE database = ? AND name = ?")) {
+             PreparedStatement statement = connection.prepareStatement("" +
+                     "SELECT engine, sorting_key, partition_key, primary_key, sampling_key " +
+                     "FROM system.tables " +
+                     "WHERE database = ? AND name = ?")) {
             statement.setString(1, tableHandle.asPlainTable().getRemoteTableName().getSchemaName().orElse(null));
             statement.setString(2, tableHandle.asPlainTable().getRemoteTableName().getTableName());
 
@@ -346,15 +349,13 @@ public class ClickHouseClient
                 }
                 return properties.buildOrThrow();
             }
-        }
-        catch (SQLException e) {
+        } catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
     @Override
-    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> nullableProperties)
-    {
+    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> nullableProperties) {
         // TODO: Support other table properties
         checkArgument(nullableProperties.size() == 1 && nullableProperties.containsKey(SAMPLE_BY_PROPERTY), "Only support setting 'sample_by' property");
         // TODO: Support sampling key removal when we support a newer version of ClickHouse. See https://github.com/ClickHouse/ClickHouse/pull/30180.
@@ -373,23 +374,20 @@ public class ClickHouseClient
                     quoted(handle.asPlainTable().getRemoteTableName()),
                     join(" ", tableOptions.build()));
             execute(session, connection, sql);
-        }
-        catch (SQLException e) {
+        } catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
     @Override
-    protected String getColumnDefinitionSql(ConnectorSession session, ColumnMetadata column, String columnName)
-    {
+    protected String getColumnDefinitionSql(ConnectorSession session, ColumnMetadata column, String columnName) {
         StringBuilder sb = new StringBuilder()
                 .append(quoted(columnName))
                 .append(" ");
         if (column.isNullable()) {
             // set column nullable property explicitly
             sb.append("Nullable(").append(toWriteMapping(session, column.getType()).getDataType()).append(")");
-        }
-        else {
+        } else {
             // By default, the clickhouse column is not allowed to be null
             sb.append(toWriteMapping(session, column.getType()).getDataType());
         }
@@ -401,28 +399,24 @@ public class ClickHouseClient
 
     @Override
     protected void createSchema(ConnectorSession session, Connection connection, String remoteSchemaName)
-            throws SQLException
-    {
+            throws SQLException {
         execute(session, connection, "CREATE DATABASE " + quoted(remoteSchemaName));
     }
 
     @Override
     protected void dropSchema(ConnectorSession session, Connection connection, String remoteSchemaName)
-            throws SQLException
-    {
+            throws SQLException {
         execute(session, connection, "DROP DATABASE " + quoted(remoteSchemaName));
     }
 
     @Override
     protected void renameSchema(ConnectorSession session, Connection connection, String remoteSchemaName, String newRemoteSchemaName)
-            throws SQLException
-    {
+            throws SQLException {
         execute(session, connection, "RENAME DATABASE " + quoted(remoteSchemaName) + " TO " + quoted(newRemoteSchemaName));
     }
 
     @Override
-    public void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column)
-    {
+    public void addColumn(ConnectorSession session, JdbcTableHandle handle, ColumnMetadata column) {
         try (Connection connection = connectionFactory.openConnection(session)) {
             String remoteColumnName = getIdentifierMapping().toRemoteColumnName(connection, column.getName());
             String sql = format(
@@ -430,15 +424,13 @@ public class ClickHouseClient
                     quoted(handle.asPlainTable().getRemoteTableName()),
                     getColumnDefinitionSql(session, column, remoteColumnName));
             execute(session, connection, sql);
-        }
-        catch (SQLException e) {
+        } catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
     @Override
-    public void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment)
-    {
+    public void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment) {
         String sql = format(
                 "ALTER TABLE %s MODIFY COMMENT %s",
                 quoted(handle.asPlainTable().getRemoteTableName()),
@@ -447,8 +439,7 @@ public class ClickHouseClient
     }
 
     @Override
-    public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
-    {
+    public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment) {
         String sql = format(
                 "ALTER TABLE %s COMMENT COLUMN %s %s",
                 quoted(handle.asPlainTable().getRemoteTableName()),
@@ -458,27 +449,23 @@ public class ClickHouseClient
     }
 
     @Override
-    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type)
-    {
+    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type) {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting column types");
     }
 
-    private static String clickhouseVarcharLiteral(String value)
-    {
+    private static String clickhouseVarcharLiteral(String value) {
         requireNonNull(value, "value is null");
         return convertToQuotedString(value);
     }
 
     @Override
-    protected Optional<List<String>> getTableTypes()
-    {
+    protected Optional<List<String>> getTableTypes() {
         return Optional.empty();
     }
 
     @Override
     protected void renameTable(ConnectorSession session, Connection connection, String catalogName, String remoteSchemaName, String remoteTableName, String newRemoteSchemaName, String newRemoteTableName)
-            throws SQLException
-    {
+            throws SQLException {
         execute(session, connection, format("RENAME TABLE %s.%s TO %s.%s",
                 quoted(remoteSchemaName),
                 quoted(remoteTableName),
@@ -487,27 +474,23 @@ public class ClickHouseClient
     }
 
     @Override
-    protected Optional<BiFunction<String, Long, String>> limitFunction()
-    {
+    protected Optional<BiFunction<String, Long, String>> limitFunction() {
         return Optional.of((sql, limit) -> sql + " LIMIT " + limit);
     }
 
     @Override
-    public boolean isLimitGuaranteed(ConnectorSession session)
-    {
+    public boolean isLimitGuaranteed(ConnectorSession session) {
         return true;
     }
 
     @Override
-    public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle)
-    {
+    public OptionalLong delete(ConnectorSession session, JdbcTableHandle handle) {
         // ClickHouse does not support DELETE syntax, but is using custom: ALTER TABLE [db.]table [ON CLUSTER cluster] DELETE WHERE filter_expr
         throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
     }
 
     @Override
-    public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
-    {
+    public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle) {
         String jdbcTypeName = typeHandle.getJdbcTypeName()
                 .orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
 
@@ -592,8 +575,7 @@ public class ClickHouseClient
                 if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
                     int scale = Math.min(decimalDigits, getDecimalDefaultScale(session));
                     decimalColumnMapping = decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session));
-                }
-                else {
+                } else {
                     decimalColumnMapping = decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0)));
                 }
                 return Optional.of(new ColumnMapping(
@@ -637,8 +619,7 @@ public class ClickHouseClient
     }
 
     @Override
-    public WriteMapping toWriteMapping(ConnectorSession session, Type type)
-    {
+    public WriteMapping toWriteMapping(ConnectorSession session, Type type) {
         if (type == BOOLEAN) {
             // ClickHouse is no separate type for boolean values. Use UInt8 type, restricted to the values 0 or 1.
             return WriteMapping.booleanMapping("UInt8", booleanWriteFunction());
@@ -688,22 +669,20 @@ public class ClickHouseClient
         throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type);
     }
 
-    private ClickHouseVersion getClickHouseServerVersion(ConnectorSession session)
-    {
+    private ClickHouseVersion getClickHouseServerVersion(ConnectorSession session) {
         return clickHouseVersion.updateAndGet(current -> {
             if (current != null) {
                 return current;
             }
 
             try (Connection connection = connectionFactory.openConnection(session);
-                    PreparedStatement statement = connection.prepareStatement("SELECT version()");
-                    ResultSet resultSet = statement.executeQuery()) {
+                 PreparedStatement statement = connection.prepareStatement("SELECT version()");
+                 ResultSet resultSet = statement.executeQuery()) {
                 if (resultSet.next()) {
                     current = ClickHouseVersion.of(resultSet.getString(1));
                 }
                 return current;
-            }
-            catch (SQLException e) {
+            } catch (SQLException e) {
                 throw new TrinoException(JDBC_ERROR, e);
             }
         });
@@ -715,8 +694,7 @@ public class ClickHouseClient
      * @param prop property will be formatted
      * @return formatted property
      */
-    private Optional<String> formatProperty(List<String> prop)
-    {
+    private Optional<String> formatProperty(List<String> prop) {
         if (prop == null || prop.isEmpty()) {
             return Optional.empty();
         }
@@ -728,8 +706,7 @@ public class ClickHouseClient
         return Optional.of(prop.stream().map(this::quoted).collect(Collectors.joining(",", "(", ")")));
     }
 
-    private static LongWriteFunction uInt8WriteFunction(ClickHouseVersion version)
-    {
+    private static LongWriteFunction uInt8WriteFunction(ClickHouseVersion version) {
         return (statement, index, value) -> {
             // ClickHouse stores incorrect results when the values are out of supported range.
             UINT8.validate(version, value);
@@ -737,8 +714,7 @@ public class ClickHouseClient
         };
     }
 
-    private static LongWriteFunction uInt16WriteFunction(ClickHouseVersion version)
-    {
+    private static LongWriteFunction uInt16WriteFunction(ClickHouseVersion version) {
         return (statement, index, value) -> {
             // ClickHouse stores incorrect results when the values are out of supported range.
             UINT16.validate(version, value);
@@ -746,8 +722,7 @@ public class ClickHouseClient
         };
     }
 
-    private static LongWriteFunction uInt32WriteFunction(ClickHouseVersion version)
-    {
+    private static LongWriteFunction uInt32WriteFunction(ClickHouseVersion version) {
         return (preparedStatement, parameterIndex, value) -> {
             // ClickHouse stores incorrect results when the values are out of supported range.
             UINT32.validate(version, value);
@@ -755,8 +730,7 @@ public class ClickHouseClient
         };
     }
 
-    private static ObjectWriteFunction uInt64WriteFunction(ClickHouseVersion version)
-    {
+    private static ObjectWriteFunction uInt64WriteFunction(ClickHouseVersion version) {
         return ObjectWriteFunction.of(
                 Int128.class,
                 (statement, index, value) -> {
@@ -768,16 +742,14 @@ public class ClickHouseClient
                 });
     }
 
-    private static ColumnMapping dateColumnMappingUsingLocalDate(ClickHouseVersion version)
-    {
+    private static ColumnMapping dateColumnMappingUsingLocalDate(ClickHouseVersion version) {
         return ColumnMapping.longMapping(
                 DATE,
                 dateReadFunctionUsingLocalDate(),
                 dateWriteFunctionUsingLocalDate(version));
     }
 
-    private static LongWriteFunction dateWriteFunctionUsingLocalDate(ClickHouseVersion version)
-    {
+    private static LongWriteFunction dateWriteFunctionUsingLocalDate(ClickHouseVersion version) {
         return (statement, index, value) -> {
             LocalDate date = LocalDate.ofEpochDay(value);
             // Deny unsupported dates eagerly to prevent unexpected results. ClickHouse stores '1970-01-01' when the date is out of supported range.
@@ -786,8 +758,7 @@ public class ClickHouseClient
         };
     }
 
-    private static LongWriteFunction timestampSecondsWriteFunction(ClickHouseVersion version)
-    {
+    private static LongWriteFunction timestampSecondsWriteFunction(ClickHouseVersion version) {
         return (statement, index, value) -> {
             long epochSecond = floorDiv(value, MICROSECONDS_PER_SECOND);
             int nanoFraction = floorMod(value, MICROSECONDS_PER_SECOND) * NANOSECONDS_PER_MICROSECOND;
@@ -799,16 +770,14 @@ public class ClickHouseClient
         };
     }
 
-    private static LongReadFunction shortTimestampWithTimeZoneReadFunction()
-    {
+    private static LongReadFunction shortTimestampWithTimeZoneReadFunction() {
         return (resultSet, columnIndex) -> {
             ZonedDateTime zonedDateTime = resultSet.getObject(columnIndex, ZonedDateTime.class);
             return packDateTimeWithZone(zonedDateTime.toInstant().toEpochMilli(), zonedDateTime.getZone().getId());
         };
     }
 
-    private static LongWriteFunction shortTimestampWithTimeZoneWriteFunction()
-    {
+    private static LongWriteFunction shortTimestampWithTimeZoneWriteFunction() {
         return (statement, index, value) -> {
             long millisUtc = unpackMillisUtc(value);
             TimeZoneKey timeZoneKey = unpackZoneKey(value);
@@ -816,8 +785,7 @@ public class ClickHouseClient
         };
     }
 
-    private ColumnMapping ipAddressColumnMapping(String writeBindExpression)
-    {
+    private ColumnMapping ipAddressColumnMapping(String writeBindExpression) {
         return ColumnMapping.sliceMapping(
                 ipAddressType,
                 (resultSet, columnIndex) -> {
@@ -830,11 +798,9 @@ public class ClickHouseClient
                         bytes[10] = (byte) 0xff;
                         bytes[11] = (byte) 0xff;
                         arraycopy(address, 0, bytes, 12, 4);
-                    }
-                    else if (address.length == 16) {
+                    } else if (address.length == 16) {
                         bytes = address;
-                    }
-                    else {
+                    } else {
                         throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid InetAddress length: " + address.length);
                     }
 
@@ -843,40 +809,151 @@ public class ClickHouseClient
                 ipAddressWriteFunction(writeBindExpression));
     }
 
-    private static SliceWriteFunction ipAddressWriteFunction(String bindExpression)
-    {
-        return new SliceWriteFunction()
-        {
+    private static SliceWriteFunction ipAddressWriteFunction(String bindExpression) {
+        return new SliceWriteFunction() {
             @Override
-            public String getBindExpression()
-            {
+            public String getBindExpression() {
                 return bindExpression;
             }
 
             @Override
             public void set(PreparedStatement statement, int index, Slice value)
-                    throws SQLException
-            {
+                    throws SQLException {
                 try {
                     statement.setObject(index, InetAddresses.toAddrString(InetAddress.getByAddress(value.getBytes())), Types.OTHER);
-                }
-                catch (UnknownHostException e) {
+                } catch (UnknownHostException e) {
                     throw new UncheckedIOException(e);
                 }
             }
         };
     }
 
-    private ColumnMapping uuidColumnMapping()
-    {
+    private ColumnMapping uuidColumnMapping() {
         return ColumnMapping.sliceMapping(
                 uuidType,
                 (resultSet, columnIndex) -> javaUuidToTrinoUuid((UUID) resultSet.getObject(columnIndex)),
                 uuidWriteFunction());
     }
 
-    private static SliceWriteFunction uuidWriteFunction()
-    {
+    private static SliceWriteFunction uuidWriteFunction() {
         return (statement, index, value) -> statement.setObject(index, trinoUuidToJavaUuid(value), Types.OTHER);
     }
+
+    @Override
+    public ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle tableHandle) {
+        FixedSplitSource defaultResult = new FixedSplitSource(ImmutableList.of(new ClickHouseSplit(Optional.empty(), Optional.empty())));
+
+        if (!tableHandle.isNamedRelation() || tableHandle.getLimit().isPresent()) {
+            return defaultResult;
+        }
+        RemoteTableName schemaTableName = tableHandle.getRequiredNamedRelation().getRemoteTableName();
+        if (schemaTableName.getSchemaName().isEmpty()) {
+            return defaultResult;
+        }
+
+        String table = schemaTableName.getTableName();
+
+        String cluster = "";
+        String database = "";
+        String localTable = "";
+        boolean isDistributed = false;
+        try {
+            Connection connection = connectionFactory.openConnection(session);
+            Statement sts = connection.createStatement();
+            String sql = format("SELECT engine, engine_full FROM system.tables WHERE database='%s' AND name='%s'", schemaTableName.getSchemaName().get(), table);
+            ResultSet rs = sts.executeQuery(sql);
+            while (rs.next()) {
+                if (rs.getString("engine").equals("Distributed")) {
+                    String engineFull = rs.getString("engine_full");
+                    Matcher m = distributedEngine.matcher(engineFull);
+                    if (!m.find()) {
+                        return defaultResult;
+                    }
+                    cluster = m.group(1);
+                    database = m.group(2);
+                    localTable = m.group(3);
+                    isDistributed = true;
+                }
+            }
+
+        } catch (SQLException e) {
+            return defaultResult;
+        }
+
+
+        String sql = "";
+        if (isDistributed) {
+            // for distributed table
+            sql = format("SELECT distinct(name) AS _part FROM cluster('%s', 'system', 'parts') WHERE database='%s' and table='%s'", cluster, database, localTable);
+        } else {
+            sql = format("SELECT distinct(name) AS _part FROM system.parts WHERE database='%s' and table='%s'", schemaTableName.getSchemaName().get(), table);
+        }
+
+        List<String> parts = new ArrayList<>();
+        try {
+            Connection connection = connectionFactory.openConnection(session);
+            Statement sts = connection.createStatement();
+            ResultSet rs = sts.executeQuery(sql);
+            while (rs.next()) {
+                String part = rs.getString("_part");
+                parts.add(part);
+            }
+        } catch (SQLException e) {
+            return defaultResult;
+        }
+
+        if (parts.size() == 0) {
+            return defaultResult;
+        }
+
+        ArrayList<ClickHouseSplit> splitList = new ArrayList<>();
+
+        for (String s : parts) {
+            splitList.add(new ClickHouseSplit(
+                    Optional.of(format("_part='%s'", s)),
+                    Optional.of(table)));
+        }
+
+        return new FixedSplitSource(Collections.unmodifiableList(splitList));
+    }
+
+    @Override
+    protected PreparedQuery prepareQuery(
+            ConnectorSession session,
+            Connection connection,
+            JdbcTableHandle table,
+            Optional<List<List<JdbcColumnHandle>>> groupingSets,
+            List<JdbcColumnHandle> columns,
+            Map<String, ParameterizedExpression> columnExpressions,
+            Optional<JdbcSplit> split) {
+        JdbcRelationHandle baseRelation = table.getRelationHandle();
+
+        if (split.isPresent()) {
+            ClickHouseSplit chSplit = (ClickHouseSplit) split.get();
+            if (baseRelation instanceof JdbcNamedRelationHandle) {
+                Optional<String> tableName = chSplit.getTableName();
+                if (tableName.isPresent()) {
+                    RemoteTableName remoteTableName = ((JdbcNamedRelationHandle) baseRelation).getRemoteTableName();
+                    remoteTableName = new RemoteTableName(remoteTableName.getCatalogName(), remoteTableName.getSchemaName(), tableName.get());
+                    SchemaTableName schemaTableName = ((JdbcNamedRelationHandle) baseRelation).getSchemaTableName();
+                    //                    log.debug("remoteTableName: %s", remoteTableName);
+                    baseRelation = new JdbcNamedRelationHandle(schemaTableName, remoteTableName, Optional.empty());
+                }
+            }
+        }
+
+
+        return applyQueryTransformations(table, queryBuilder.prepareSelectQuery(
+                this,
+                session,
+                connection,
+                baseRelation,
+                groupingSets,
+                columns,
+                columnExpressions,
+                table.getConstraint(),
+                getAdditionalPredicate(table.getConstraintExpressions(), split.flatMap(JdbcSplit::getAdditionalPredicate))));
+    }
+
+
 }
