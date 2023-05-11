@@ -64,7 +64,7 @@ public class DynamicFilteringJdbcSplitSource
                                         JdbcSplit jdbcSplit = (JdbcSplit) split;
                                         // If split was a subclass of JdbcSplit, there would be additional information
                                         // that we would need to pass further on.
-                                        verify(jdbcSplit.getClass() == JdbcSplit.class, "Unexpected split type %s", jdbcSplit);
+                                        verify(JdbcSplit.class.isAssignableFrom(jdbcSplit.getClass()), "Unexpected split type %s", jdbcSplit);
                                         return jdbcSplit.withDynamicFilter(dynamicFilterPredicate);
                                     })
                                     .collect(toImmutableList()),

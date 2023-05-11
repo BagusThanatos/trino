@@ -15,18 +15,27 @@ package io.trino.plugin.clickhouse;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcSplit;
+import io.trino.spi.predicate.TupleDomain;
 
 import java.util.Optional;
 
 public class ClickHouseSplit extends JdbcSplit {
     private final Optional<String> tableName;
 
-    @JsonCreator
     public ClickHouseSplit(
             @JsonProperty("additionalPredicate") Optional<String> additionalPredicate,
             @JsonProperty("tableName") Optional<String> tableName) {
-        super(additionalPredicate);
+        this(additionalPredicate, tableName, TupleDomain.all());
+    }
+
+    @JsonCreator
+    public ClickHouseSplit(
+            @JsonProperty("additionalPredicate") Optional<String> additionalPredicate,
+            @JsonProperty("tableName") Optional<String> tableName,
+            @JsonProperty("dynamicFilter") TupleDomain<JdbcColumnHandle> dynamicFilter) {
+        super(additionalPredicate, dynamicFilter);
         this.tableName = tableName;
     }
 
@@ -38,5 +47,11 @@ public class ClickHouseSplit extends JdbcSplit {
     @Override
     public Object getInfo() {
         return this;
+    }
+
+    @Override
+    public JdbcSplit withDynamicFilter(TupleDomain<JdbcColumnHandle> dynamicFilter)
+    {
+        return new ClickHouseSplit(getAdditionalPredicate(), tableName, dynamicFilter);
     }
 }
